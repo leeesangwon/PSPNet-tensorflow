@@ -395,6 +395,11 @@ class PSPNet101(Network):
              .conv(1, 1, 2048, 1, 1, biased=False, relu=False, name='conv5_1_1x1_proj')
              .batch_normalization(relu=False, name='conv5_1_1x1_proj_bn'))
 
+        # aux loss
+        (self.fead('conv4_23/relu')
+             .dropout(keep_prob=0.9, name='conv4_23/dropout')
+             .conv(1, 1, num_classes, 1, 1, biased=True, relu=False, name='conv4_23_dropout_conv_new'))
+
         (self.feed('conv4_23/relu')
              .conv(1, 1, 512, 1, 1, biased=False, relu=False, name='conv5_1_1x1_reduce')
              .batch_normalization(relu=True, name='conv5_1_1x1_reduce_bn')
@@ -403,7 +408,7 @@ class PSPNet101(Network):
              .batch_normalization(relu=True, name='conv5_1_3x3_bn')
              .conv(1, 1, 2048, 1, 1, biased=False, relu=False, name='conv5_1_1x1_increase')
              .batch_normalization(relu=False, name='conv5_1_1x1_increase_bn'))
-
+        
         (self.feed('conv5_1_1x1_proj_bn',
                    'conv5_1_1x1_increase_bn')
              .add(name='conv5_1')

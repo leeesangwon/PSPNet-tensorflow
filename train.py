@@ -123,6 +123,10 @@ def main():
     net = PSPNet101({'data': image_batch}, is_training=True, num_classes=args.num_classes)
     
     raw_output = net.layers['conv6']
+    raw_aux_output = net.layers['conv4_23_dropout_conv_new']
+
+    raw_output_up = tf.image.resize_bilinear(raw_output, size=[h, w], align_corners=True)
+    raw_aux_output_up = tf.image.resize_bilinear(raw_aux_output, size=[h, w], align_corners=True)
 
     # According from the prototxt in Caffe implement, learning rate must multiply by 10.0 in pyramid module
     fc_list = ['conv5_3_pool1_conv', 'conv5_3_pool2_conv', 'conv5_3_pool3_conv', 'conv5_3_pool6_conv', 'conv6', 'conv5_4']
@@ -136,17 +140,20 @@ def main():
     assert(len(fc_trainable) == len(fc_w_trainable) + len(fc_b_trainable))
     
     # Predictions: ignoring all predictions with labels greater or equal than n_classes
-    raw_prediction = tf.reshape(raw_output, [-1, args.num_classes])
-    label_proc = prepare_label(label_batch, tf.stack(raw_output.get_shape()[1:3]), num_classes=args.num_classes, one_hot=False) # [batch_size, h, w]
+    raw_prediction = tf.reshape(raw_output_up, [-1, args.num_classes])
+    raw_aux_prediction = tf.reshape(raw_aux_output_up, [-1, args.num_classes])
+    label_proc = prepare_label(label_batch, tf.stack(raw_output_up.get_shape()[1:3]), num_classes=args.num_classes, one_hot=False) # [batch_size, h, w]
     raw_gt = tf.reshape(label_proc, [-1,])
     indices = tf.squeeze(tf.where(tf.less_equal(raw_gt, args.num_classes - 1)), 1)
     gt = tf.cast(tf.gather(raw_gt, indices), tf.int32)
     prediction = tf.gather(raw_prediction, indices)
+    aux_prediction = tf.gather(raw_aux_prediction, indices)
                                                                                             
     # Pixel-wise softmax loss.
     loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction, labels=gt)
+    aux_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=aux_prediction, labels=gt)
     l2_losses = [args.weight_decay * tf.nn.l2_loss(v) for v in tf.trainable_variables() if 'weights' in v.name]
-    reduced_loss = tf.reduce_mean(loss) + tf.add_n(l2_losses)
+    reduced_loss = tf.reduce_mean(loss) + 0.4 * tf.reduce_mean(aux_loss) + tf.add_n(l2_losses)
 
     # Using Poly learning rate policy 
     base_lr = tf.constant(args.learning_rate)
