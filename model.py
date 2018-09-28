@@ -396,7 +396,7 @@ class PSPNet101(Network):
              .batch_normalization(relu=False, name='conv5_1_1x1_proj_bn'))
 
         # aux loss
-        (self.fead('conv4_23/relu')
+        (self.feed('conv4_23/relu')
              .dropout(keep_prob=0.9, name='conv4_23/dropout')
              .conv(1, 1, num_classes, 1, 1, biased=True, relu=False, name='conv4_23_dropout_conv_new'))
 
