@@ -11,6 +11,8 @@ import time
 
 import tensorflow as tf
 import numpy as np
+from tensorflow.errors import NotFoundError
+from tensorpack.tfutils.optimizer import AccumGradOptimizer
 
 from model import PSPNet101
 from tools import prepare_label
@@ -18,20 +20,21 @@ from image_reader import ImageReader
 
 IMG_MEAN = np.array((103.939, 116.779, 123.68), dtype=np.float32)
 
-BATCH_SIZE = 2
-DATA_DIRECTORY = '/SSD_data/cityscapes_dataset/cityscape'
+BATCH_SIZE = 1
+ITER_SIZE = 16
+DATA_DIRECTORY = '/home/sangwon/Projects/data/cityscapes'
 DATA_LIST_PATH = './list/cityscapes_train_list.txt'
 IGNORE_LABEL = 255
 INPUT_SIZE = '713,713'
 LEARNING_RATE = 1e-3
 MOMENTUM = 0.9
 NUM_CLASSES = 19
-NUM_STEPS = 60001
+NUM_STEPS = 90000
 POWER = 0.9
 RANDOM_SEED = 1234
 WEIGHT_DECAY = 0.0001
-RESTORE_FROM = './'
-SNAPSHOT_DIR = './model/'
+RESTORE_FROM = './model/pspnet101/'
+SNAPSHOT_DIR = './model/pspnet101_re/'
 SAVE_NUM_IMAGES = 4
 SAVE_PRED_EVERY = 50
 
@@ -130,7 +133,8 @@ def main():
 
     # According from the prototxt in Caffe implement, learning rate must multiply by 10.0 in pyramid module
     fc_list = ['conv5_3_pool1_conv', 'conv5_3_pool2_conv', 'conv5_3_pool3_conv', 'conv5_3_pool6_conv', 'conv6', 'conv5_4']
-    restore_var = [v for v in tf.global_variables()]
+    not_restore_list = ['conv4_23_dropout_conv_new', 'conv5_3_pool1_conv', 'conv5_3_pool2_conv', 'conv5_3_pool3_conv', 'conv5_3_pool6_conv', 'conv5_4', 'conv6']
+    restore_var = [v for v in tf.global_variables() if v not in not_restore_list]
     all_trainable = [v for v in tf.trainable_variables() if ('beta' not in v.name and 'gamma' not in v.name) or args.train_beta_gamma]
     fc_trainable = [v for v in all_trainable if v.name.split('/')[0] in fc_list]
     conv_trainable = [v for v in all_trainable if v.name.split('/')[0] not in fc_list] # lr * 1.0
@@ -168,9 +172,12 @@ def main():
 
     with tf.control_dependencies(update_ops):
         opt_conv = tf.train.MomentumOptimizer(learning_rate, args.momentum)
+        opt_conv = AccumGradOptimizer(opt_conv, ITER_SIZE)
         opt_fc_w = tf.train.MomentumOptimizer(learning_rate * 10.0, args.momentum)
+        opt_fc_w = AccumGradOptimizer(opt_fc_w, ITER_SIZE)
         opt_fc_b = tf.train.MomentumOptimizer(learning_rate * 20.0, args.momentum)
-
+        opt_fc_b = AccumGradOptimizer(opt_fc_b, ITER_SIZE)
+        
         grads = tf.gradients(reduced_loss, conv_trainable + fc_w_trainable + fc_b_trainable)
         grads_conv = grads[:len(conv_trainable)]
         grads_fc_w = grads[len(conv_trainable) : (len(conv_trainable) + len(fc_w_trainable))]
@@ -199,8 +206,18 @@ def main():
         load_step = int(os.path.basename(ckpt.model_checkpoint_path).split('-')[1])
         load(loader, sess, ckpt.model_checkpoint_path)
     else:
-        print('No checkpoint file found.')
-        load_step = 0
+        print('Restore from initial model')
+        ckpt = tf.train.get_checkpoint_state(RESTORE_FROM)
+        if ckpt and ckpt.model_checkpoint_path:
+            loader = tf.train.Saver(var_list=restore_var)
+            load_step = int(os.path.basename(ckpt.model_checkpoint_path).split('-')[1])
+            try:
+                load(loader, sess, ckpt.model_checkpoint_path)
+            except NotFoundError as e:
+                tf.logging.warning('There are some Variable missing from the ckeckpoint.')
+        else:
+            print('No checkpoint file found.')
+            load_step = 0
 
     # Start queue threads.
     threads = tf.train.start_queue_runners(coord=coord, sess=sess)
@@ -211,10 +228,12 @@ def main():
         
         feed_dict = {step_ph: step}
         if step % args.save_pred_every == 0:
-            loss_value, _ = sess.run([reduced_loss, train_op], feed_dict=feed_dict)
+            for _ in range(ITER_SIZE):
+                loss_value, _ = sess.run([reduced_loss, train_op], feed_dict=feed_dict)
             save(saver, sess, args.snapshot_dir, step)
         else:
-            loss_value, _ = sess.run([reduced_loss, train_op], feed_dict=feed_dict)
+            for _ in range(ITER_SIZE):
+                loss_value, _ = sess.run([reduced_loss, train_op], feed_dict=feed_dict)
         duration = time.time() - start_time
         print('step {:d} \t loss = {:.3f}, ({:.3f} sec/step)'.format(step, loss_value, duration))
         
