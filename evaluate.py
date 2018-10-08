@@ -9,7 +9,7 @@ import tensorflow as tf
 import numpy as np
 
 from tqdm import trange
-from model import PSPNet101, PSPNet50
+from model_original import PSPNet101, PSPNet50
 from tools import *
 
 SNAPSHOT_DIR = './model/ade20k_model'
@@ -23,12 +23,12 @@ ADE20k_param = {'crop_size': [473, 473],
                 'data_dir': '../ADEChallengeData2016/', #### Change this line
                 'val_list': './list/ade20k_val_list.txt'}
                 
-cityscapes_param = {'crop_size': [720, 720],
+cityscapes_param = {'crop_size': [713, 713],
                     'num_classes': 19,
                     'ignore_label': 255,
                     'num_steps': 500,
                     'model': PSPNet101,
-                    'data_dir': '/data/cityscapes_dataset/cityscape', #### Change this line
+                    'data_dir': '/home/sangwon/Projects/data/cityscapes', #### Change this line
                     'val_list': './list/cityscapes_val_list.txt'}
 
 def get_arguments():
@@ -68,6 +68,8 @@ def scale_dimension(dim, scale):
 
 
 def main():
+    tf.logging.set_verbosity('INFO')
+    
     args = get_arguments()
 
     # load parameters
@@ -83,6 +85,8 @@ def main():
     PSPNet = param['model']
     data_dir = param['data_dir']
 
+    eval_scales = [float(x) for x in args.eval_scales]
+
     # Set placeholder 
     image_filename = tf.placeholder(dtype=tf.string)
     anno_filename = tf.placeholder(dtype=tf.string)
@@ -95,40 +99,47 @@ def main():
 
     shape = tf.shape(img)
     h, w = (tf.maximum(crop_size[0], shape[0]), tf.maximum(crop_size[1], shape[1]))
+    crop_h, crop_w = crop_size
     img = preprocess(img, h, w)
     
     predictions = []
-    for i, image_scale in enumerate(args.eval_scales):
+    for i, image_scale in enumerate(eval_scales):
         if image_scale != 1.0:
             scaled_h = scale_dimension(h, image_scale)
             scaled_w = scale_dimension(w, image_scale)
-            scaled_crop_size = [scaled_h, scaled_w]
+            scaled_crop_h = scale_dimension(crop_h, image_scale)
+            scaled_crop_w = scale_dimension(crop_w, image_scale)
+            scaled_img_size = [scaled_h, scaled_w]
+            scaled_crop_size = [scaled_crop_h, scaled_crop_w]
             scaled_img = tf.image.resize_bilinear(
-                img, scaled_crop_size, align_corners=True)
+                img, scaled_img_size, align_corners=True)
         else:
             scaled_img = img
-                
+            scaled_img_size = [h, w]
+            scaled_crop_size = [crop_h, crop_w]
+
         # Create network.
         with tf.variable_scope('', reuse=True if i else None):
-            net = PSPNet({'data': scaled_img}, is_training=False, num_classes=num_classes)
-        with tf.variable_scope('', reuse=True):
-            flipped_img = tf.image.flip_left_right(tf.squeeze(scaled_img))
-            flipped_img = tf.expand_dims(flipped_img, dim=0)
-            net2 = PSPNet({'data': flipped_img}, is_training=False, num_classes=num_classes)
-
-        raw_output = net.layers['conv6']
-
+            net = PSPNet({'data': scaled_img}, is_training=False, num_classes=num_classes, crop_size=scaled_crop_size)
+            raw_output = net.layers['conv6']
+        
         # Do flipped eval or not
         if args.flipped_eval:
-            flipped_output = tf.image.flip_left_right(tf.squeeze(net2.layers['conv6']))
-            flipped_output = tf.expand_dims(flipped_output, dim=0)
-            raw_output = tf.add_n([raw_output, flipped_output])
+            with tf.variable_scope('', reuse=True):
+                flipped_img = tf.reverse(scaled_img, [2])
+                net2 = PSPNet({'data': flipped_img}, is_training=False, num_classes=num_classes, crop_size=scaled_crop_size)
+                flipped_output = tf.reverse(net2.layers['conv6'], [2])
 
         # Scale feature map to image size, get prediction
         raw_output_up = tf.image.resize_bilinear(raw_output, size=[h, w], align_corners=True)
         predictions.append(
             tf.expand_dims(tf.nn.softmax(raw_output_up), 4))
-    
+        
+        if args.flipped_eval:
+            flipped_output_up = tf.image.resize_bilinear(flipped_output, size=[h, w], align_corners=True)
+            predictions.append(
+                tf.expand_dims(tf.nn.softmax(flipped_output_up), 4))
+
     raw_output_up = tf.reduce_mean(tf.concat(predictions, 4), axis=4)
     raw_output_up = tf.image.crop_to_bounding_box(raw_output_up, 0, 0, shape[0], shape[1])
     raw_output_up = tf.argmax(raw_output_up, dimension=3)
